@@ -98,7 +98,10 @@ def publish_image_post(
             timeout=60,
         )
 
-    response.raise_for_status()
+    if not response.ok:
+        print("Facebook API error:")
+        print(response.text)
+        response.raise_for_status()
 
     result = response.json()
 
