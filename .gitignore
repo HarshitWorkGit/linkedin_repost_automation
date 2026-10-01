@@ -1,0 +1,25 @@
+# Credentials
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Local extraction output (keep the directory via generated/.gitkeep)
+generated/*
+!generated/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
