@@ -1,17 +1,21 @@
 # LinkedIn Repost Automation
 
-Self-contained workflow that takes a LinkedIn post URL, extracts its caption and image, shows a preview, and publishes to Facebook and Instagram only after an explicit approval.
+Publishes one queued LinkedIn post to Facebook and Instagram after an explicit approval.
 
-This repository is scaffolding. LinkedIn extraction is not implemented, and neither publisher sends an API request.
+`data/linkedin_posts.json` is the source of truth. The command does not take a LinkedIn URL. It selects one eligible record, downloads that post's first image, and publishes only when the operator types `APPROVE`.
 
 ## Workflow
 
 ```text
-LinkedIn post URL
+data/linkedin_posts.json
         │
         ▼
-linkedin_extractor.extract_linkedin_post
-        │  caption + image saved under generated/
+post_store.get_next_post
+        │  status = "new", caption, LinkedIn URL, first image URL
+        │  oldest postedat.date
+        ▼
+repost.download_post_image
+        │  local file under generated/
         ▼
 repost.prepare_preview
         │
@@ -21,17 +25,44 @@ repost.require_explicit_approval
         ▼
 facebook_publisher.publish_to_facebook
 instagram_publisher.publish_to_instagram
+        │
+        ▼
+post_store.mark_published
+        │  status "new" -> "published" only when both publishes return
 ```
 
-`repost.py` is the only orchestrator. The extractor and the two publishers do not import each other.
+If no eligible post exists, the command exits without publishing.
+
+If approval is declined, or the terminal is not interactive, the record stays `"new"` and nothing is published.
+
+If Facebook or Instagram raises an error, the record stays `"new"` so the same post can be retried. Status is not changed unless both publishes return.
+
+`repost.py` is the orchestrator. The queue, the extractor, and the two publishers do not import each other. Publisher modules still load their own credentials from `.env`.
 
 | Module | Responsibility |
 | --- | --- |
-| `repost.py` | CLI, preview, approval gate, and the call order above |
-| `linkedin_extractor.py` | Turn a LinkedIn URL into a caption and a local image |
+| `repost.py` | Queue run, image download, preview, approval gate, and publish order |
+| `post_store.py` | Load `data/linkedin_posts.json`, select one eligible post, update status |
+| `linkedin_extractor.py` | Validate the caption and local image before preview |
 | `facebook_publisher.py` | Publish that image and caption to a Facebook Page |
 | `instagram_publisher.py` | Publish that image and caption to Instagram |
-| `generated/` | Local image output. Contents are gitignored except `.gitkeep` |
+| `data/linkedin_posts.json` | Post queue. Eligible records use `status` `"new"` |
+| `generated/` | Downloaded images. Contents are gitignored except `.gitkeep` |
+
+## Queue rules
+
+A record is eligible when all of these are true:
+
+- `status` is `"new"`
+- `content` is non-empty
+- `linkedinurl` is non-empty
+- `postimages` parses to a list with at least one image URL
+
+`postimages` and `postedat` are JSON strings in the file. The store parses them when selecting a post and writes back only `status`. Every other field is preserved.
+
+When more than one record is eligible, the oldest `postedat.date` is selected. Pass `--post-id` to select one eligible record by `id` instead.
+
+Only the first image URL is downloaded. The file is saved as `generated/<post-id>.<ext>` and is not committed.
 
 ## Requirements
 
@@ -44,7 +75,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-The only dependency today is `python-dotenv`. HTTP clients will be added when the publishers are implemented.
+Dependencies: `python-dotenv` and `requests`. The queue itself uses the Python standard library. Instagram publishing also needs `cloudflared` on the machine that runs the command.
 
 ## Configuration
 
@@ -66,24 +97,21 @@ INSTAGRAM_ACCESS_TOKEN=
 ## Usage
 
 ```bash
-python repost.py "https://www.linkedin.com/posts/..."
+python repost.py
 ```
 
-The command accepts the URL, then stops at the extraction placeholder. After extraction exists, the same command prints the caption and image path and waits until the operator types `APPROVE`. Any other input skips both publishes. A non-interactive terminal cannot approve a publish.
+Optional, for one eligible record:
 
-Expected exit codes once the surrounding checks run:
+```bash
+python repost.py --post-id 7507679936275644416
+```
+
+The command prints the LinkedIn URL, caption, and downloaded image path, then waits until the operator types `APPROVE`. Any other input skips both publishes. A non-interactive terminal cannot approve a publish.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Finished, or the operator did not approve |
-| 1 | Invalid input, such as a missing URL, image, or caption |
-| 2 | A stage is still a placeholder |
+| 0 | Published, the operator did not approve, or no eligible post was found |
+| 1 | Invalid input, a missing image, a download error, or a publish error |
+| 2 | A stage raised `NotImplementedError` |
 
-## Current status
-
-- [x] Project layout, environment loading, and workflow skeleton
-- [ ] LinkedIn caption and image extraction
-- [ ] Facebook image publish
-- [ ] Instagram image publish
-
-Each unfinished step is marked with `TODO` in the module that owns it.
+A publish error leaves the queue record at `"new"`.

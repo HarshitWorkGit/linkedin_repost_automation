@@ -1,13 +1,17 @@
-"""Workflow skeleton: LinkedIn post URL to Facebook and Instagram.
+"""Publish the next queued LinkedIn post to Facebook and Instagram.
 
-Nothing is scraped and nothing is published. Each stage calls a placeholder
-that marks where the real implementation will go.
+The queue is ``data/linkedin_posts.json``. This module selects one record,
+downloads its first image, shows a preview, and publishes only after the
+operator types APPROVE.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,10 +20,20 @@ from dotenv import load_dotenv
 from facebook_publisher import publish_to_facebook
 from instagram_publisher import publish_to_instagram
 from linkedin_extractor import LinkedInPost, build_linkedin_post
+from post_store import get_next_post, mark_published
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ENV_PATH = PROJECT_ROOT / ".env"
+GENERATED_DIR = PROJECT_ROOT / "generated"
 APPROVAL_TOKEN = "APPROVE"
+
+_IMAGE_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
 
 
 @dataclass(frozen=True)
@@ -70,7 +84,7 @@ def require_explicit_approval(preview: RepostPreview) -> bool:
 
 
 def publish_approved(preview: RepostPreview) -> None:
-    """Hand an approved preview to the Facebook and Instagram placeholders.
+    """Hand an approved preview to Facebook and then Instagram.
 
     TODO: Record each platform result once the publishers return post ids.
     """
@@ -91,88 +105,122 @@ def publish_approved(preview: RepostPreview) -> None:
         raise NotImplementedError(" ".join(errors))
 
 
-def run(
-    url: str,
-    caption: str,
-    image_path: str | Path,
-) -> int:
-    """Run the repost workflow using data extracted by OpenClaw.
+def download_post_image(
+    image_url: str,
+    post_id: str,
+    directory: Path | None = None,
+) -> Path:
+    """Download the first LinkedIn image into ``generated/``."""
+    if not image_url.lower().startswith("https://"):
+        raise ValueError("Post image URL must use https.")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", post_id):
+        raise ValueError(f"Post id cannot be used as a file name: {post_id}")
+
+    destination_dir = directory or GENERATED_DIR
+    destination_dir.mkdir(parents=True, exist_ok=True)
+
+    request = urllib.request.Request(
+        image_url,
+        headers={"User-Agent": "linkedin-repost-queue/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            content_type = response.headers.get("Content-Type", "")
+            data = response.read()
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not download the LinkedIn image: {exc}") from exc
+
+    if not data:
+        raise ValueError("Downloaded LinkedIn image was empty.")
+
+    extension = _image_extension(content_type, data)
+    if extension is None:
+        raise ValueError("Downloaded LinkedIn image was not a recognized image.")
+
+    destination = destination_dir / f"{post_id}{extension}"
+    destination.write_bytes(data)
+    return destination
+
+
+def run(post_id: str | None = None, posts_path: Path | None = None) -> int:
+    """Select one queued post, preview it, and publish only after approval.
 
     Steps:
-        1. Accept the LinkedIn URL.
-        2. Receive the caption and downloaded image from OpenClaw.
-        3. Validate the extracted data.
-        4. Prepare the preview.
-        5. Require explicit approval.
-        6. Publish to Facebook and Instagram only after approval.
+        1. Load the JSON queue and select one status=new post.
+        2. Download its first image under generated/.
+        3. Prepare the preview.
+        4. Require explicit approval.
+        5. Publish to Facebook and Instagram only after approval.
+        6. Mark the record published only when both publishes return.
     """
     load_dotenv(ENV_PATH)
 
+    queued = get_next_post(post_id=post_id, path=posts_path)
+    if queued is None:
+        if post_id:
+            print(f"No eligible post found for id {post_id}. Nothing to publish.")
+        else:
+            print("No eligible post found. Nothing to publish.")
+        return 0
+
+    print(f"Selected post {queued.id}")
+    image_path = download_post_image(queued.image_url, queued.id)
     post = build_linkedin_post(
-        url=url.strip(),
-        caption=caption,
+        url=queued.linkedin_url,
+        caption=queued.content,
         image_path=image_path,
     )
-
     preview = prepare_preview(post)
 
     if not require_explicit_approval(preview):
         return 0
 
     publish_approved(preview)
+    mark_published(queued.id, path=posts_path)
+    print(f"Published post {queued.id}. Status set to published.")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Repost a LinkedIn image post to Facebook and Instagram "
-            "after explicit approval."
+            "Publish the next new LinkedIn post from data/linkedin_posts.json "
+            "to Facebook and Instagram after explicit approval."
         )
     )
-
     parser.add_argument(
-        "--url",
-        required=True,
-        help="LinkedIn post URL",
+        "--post-id",
+        help=(
+            "Optional queue record id. When omitted, the oldest status=new "
+            "post is used."
+        ),
     )
-
-    parser.add_argument(
-        "--caption-file",
-        required=True,
-        type=Path,
-        help="Text file containing the extracted LinkedIn caption",
-    )
-
-    parser.add_argument(
-        "--image",
-        required=True,
-        type=Path,
-        help="Local image downloaded from the LinkedIn post",
-    )
-
     args = parser.parse_args(argv)
+    selected_id = args.post_id.strip() if args.post_id else None
 
     try:
-        caption = args.caption_file.read_text(encoding="utf-8")
-
-        return run(
-            url=args.url,
-            caption=caption,
-            image_path=args.image,
-        )
-
-    except FileNotFoundError as exc:
-        print(f"File not found: {exc}", file=sys.stderr)
-        return 1
-
+        return run(post_id=selected_id)
     except NotImplementedError as exc:
         print(f"Not implemented: {exc}", file=sys.stderr)
         return 2
-
-    except ValueError as exc:
+    except (FileNotFoundError, ValueError, OSError, RuntimeError, TimeoutError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _image_extension(content_type: str, data: bytes) -> str | None:
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type in _IMAGE_EXTENSIONS:
+        return _IMAGE_EXTENSIONS[media_type]
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return ".gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return ".webp"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    return None
 
 
 if __name__ == "__main__":
