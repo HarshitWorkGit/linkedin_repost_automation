@@ -478,7 +478,16 @@ def create_media_container(
         timeout=DEFAULT_TIMEOUT,
     )
 
-    response.raise_for_status()
+    if not response.ok:
+        try:
+            error_body = response.json()
+        except ValueError:
+            error_body = response.text
+
+        raise RuntimeError(
+            f"Instagram media container request failed "
+            f"(HTTP {response.status_code}): {error_body}"
+        )
 
     result = response.json()
 
