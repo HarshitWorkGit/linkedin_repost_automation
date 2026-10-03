@@ -12,6 +12,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 ENV_PATH = PROJECT_ROOT / ".env"
 GENERATED_DIR = PROJECT_ROOT / "generated"
 APPROVAL_TOKEN = "APPROVE"
+DEFAULT_PLATFORM = "both"
+PLATFORM_CHOICES = ("instagram", "facebook", "both")
 
 _IMAGE_EXTENSIONS = {
     "image/jpeg": ".jpg",
@@ -58,33 +61,45 @@ def prepare_preview(post: LinkedInPost) -> RepostPreview:
     )
 
 
-def require_explicit_approval(preview: RepostPreview) -> bool:
+def require_explicit_approval(
+    preview: RepostPreview,
+    platform: str = DEFAULT_PLATFORM,
+) -> bool:
     """Show the preview and continue only after an explicit APPROVE.
 
-    Any other answer, including Enter, leaves both platforms unpublished.
+    Any other answer, including Enter, leaves the selected platforms unpublished.
     A non-interactive session cannot approve a publish.
     """
+    labels = _platform_labels(platform)
     image_display = str(preview.image_path) if preview.image_path else "(no image)"
     print("Preview")
     print(f"  LinkedIn URL: {preview.source_url}")
     print(f"  Caption: {preview.caption}")
     print(f"  Image: {image_display}")
-    print("  Facebook: same caption and image")
-    print("  Instagram: same caption and image")
+    for label in labels:
+        print(f"  {label}: same caption and image")
 
     if not sys.stdin.isatty():
         print("Publish skipped. Approval requires an interactive terminal.")
         return False
 
-    answer = input(f"Type {APPROVAL_TOKEN} to publish to Facebook and Instagram: ")
+    targets = " and ".join(labels)
+    answer = input(f"Type {APPROVAL_TOKEN} to publish to {targets}: ")
     if answer.strip() != APPROVAL_TOKEN:
         print("Publish skipped. Approval was not granted.")
         return False
     return True
 
 
-def publish_approved(preview: RepostPreview) -> None:
-    """Hand an approved preview to Facebook and then Instagram.
+def publish_approved(
+    preview: RepostPreview,
+    platform: str = DEFAULT_PLATFORM,
+) -> None:
+    """Publish an approved preview to the selected platform or platforms.
+
+    ``both`` publishes to Facebook and then Instagram. A single platform
+    publishes only there. The record is marked published by the caller only
+    when this function returns.
 
     TODO: Record each platform result once the publishers return post ids.
     """
@@ -92,10 +107,7 @@ def publish_approved(preview: RepostPreview) -> None:
         raise ValueError("Cannot publish without a local image.")
 
     errors: list[str] = []
-    for name, publish in (
-        ("Facebook", publish_to_facebook),
-        ("Instagram", publish_to_instagram),
-    ):
+    for name, publish in _publishers_for(platform):
         try:
             publish(preview.image_path, preview.caption)
         except NotImplementedError as exc:
@@ -142,7 +154,11 @@ def download_post_image(
     return destination
 
 
-def run(post_id: str | None = None, posts_path: Path | None = None) -> int:
+def run(
+    post_id: str | None = None,
+    posts_path: Path | None = None,
+    platform: str = DEFAULT_PLATFORM,
+) -> int:
     """Select one queued post, preview it, and publish only after approval.
 
     Steps:
@@ -150,10 +166,11 @@ def run(post_id: str | None = None, posts_path: Path | None = None) -> int:
         2. Download its first image under generated/.
         3. Prepare the preview.
         4. Require explicit approval.
-        5. Publish to Facebook and Instagram only after approval.
-        6. Mark the record published only when both publishes return.
+        5. Publish to the selected platform or platforms only after approval.
+        6. Mark the record published only when every selected publish returns.
     """
     load_dotenv(ENV_PATH)
+    _platform_labels(platform)
 
     queued = get_next_post(post_id=post_id, path=posts_path)
     if queued is None:
@@ -172,10 +189,10 @@ def run(post_id: str | None = None, posts_path: Path | None = None) -> int:
     )
     preview = prepare_preview(post)
 
-    if not require_explicit_approval(preview):
+    if not require_explicit_approval(preview, platform=platform):
         return 0
 
-    publish_approved(preview)
+    publish_approved(preview, platform=platform)
     mark_published(queued.id, path=posts_path)
     print(f"Published post {queued.id}. Status set to published.")
     return 0
@@ -195,17 +212,47 @@ def main(argv: list[str] | None = None) -> int:
             "post is used."
         ),
     )
+    parser.add_argument(
+        "--platform",
+        choices=PLATFORM_CHOICES,
+        default=DEFAULT_PLATFORM,
+        help=(
+            "Platform to publish to after approval. "
+            "'both' publishes to Facebook, then Instagram. Default: both."
+        ),
+    )
     args = parser.parse_args(argv)
     selected_id = args.post_id.strip() if args.post_id else None
 
     try:
-        return run(post_id=selected_id)
+        return run(post_id=selected_id, platform=args.platform)
     except NotImplementedError as exc:
         print(f"Not implemented: {exc}", file=sys.stderr)
         return 2
     except (FileNotFoundError, ValueError, OSError, RuntimeError, TimeoutError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
+
+
+def _publishers_for(platform: str) -> tuple[tuple[str, Callable[..., object]], ...]:
+    """Return ``(label, publish)`` pairs in publish order for one platform choice."""
+    ordered = (
+        ("facebook", "Facebook", publish_to_facebook),
+        ("instagram", "Instagram", publish_to_instagram),
+    )
+    if platform == "both":
+        selected = ordered
+    elif platform in ("facebook", "instagram"):
+        selected = tuple(item for item in ordered if item[0] == platform)
+    else:
+        raise ValueError(
+            "Unknown platform. Choose one of: " + ", ".join(PLATFORM_CHOICES) + "."
+        )
+    return tuple((label, publish) for _key, label, publish in selected)
+
+
+def _platform_labels(platform: str) -> tuple[str, ...]:
+    return tuple(label for label, _publish in _publishers_for(platform))
 
 
 def _image_extension(content_type: str, data: bytes) -> str | None:

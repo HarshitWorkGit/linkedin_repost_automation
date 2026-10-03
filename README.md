@@ -23,19 +23,18 @@ repost.prepare_preview
 repost.require_explicit_approval
         │  continues only if the operator types APPROVE
         ▼
-facebook_publisher.publish_to_facebook
-instagram_publisher.publish_to_instagram
-        │
+selected publisher(s)
+        │  default: Facebook, then Instagram
         ▼
 post_store.mark_published
-        │  status "new" -> "published" only when both publishes return
+        │  status "new" -> "published" only when every selected publish returns
 ```
 
 If no eligible post exists, the command exits without publishing.
 
 If approval is declined, or the terminal is not interactive, the record stays `"new"` and nothing is published.
 
-If Facebook or Instagram raises an error, the record stays `"new"` so the same post can be retried. Status is not changed unless both publishes return.
+If a selected publisher raises an error, the record stays `"new"` so the same post can be retried. There is no `"failed"` status. With the default `both`, status changes only when Facebook and Instagram both return. With one platform, status changes when that platform returns.
 
 `repost.py` is the orchestrator. The queue, the extractor, and the two publishers do not import each other. Publisher modules still load their own credentials from `.env`.
 
@@ -96,17 +95,35 @@ INSTAGRAM_ACCESS_TOKEN=
 
 ## Usage
 
+Default is both platforms, Facebook first and then Instagram:
+
 ```bash
 python repost.py
 ```
+
+The same default, written out:
+
+```bash
+python repost.py --platform both
+```
+
+Single-platform commands are for testing one publisher. They use the same queue selection, image download, preview, and `APPROVE` gate. A successful single-platform publish still sets the record to `"published"`, so it will not be selected again for the other platform.
+
+```bash
+python repost.py --platform instagram
+python repost.py --platform facebook
+```
+
+`--platform` accepts `instagram`, `facebook`, or `both`.
 
 Optional, for one eligible record:
 
 ```bash
 python repost.py --post-id 7507679936275644416
+python repost.py --post-id 7507679936275644416 --platform instagram
 ```
 
-The command prints the LinkedIn URL, caption, and downloaded image path, then waits until the operator types `APPROVE`. Any other input skips both publishes. A non-interactive terminal cannot approve a publish.
+The command prints the LinkedIn URL, caption, downloaded image path, and the selected platform. It then waits until the operator types `APPROVE`. Any other input skips publishing. A non-interactive terminal cannot approve a publish.
 
 | Code | Meaning |
 | --- | --- |
