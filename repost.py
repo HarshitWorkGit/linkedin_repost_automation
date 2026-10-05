@@ -22,6 +22,7 @@ from facebook_publisher import publish_to_facebook
 from instagram_publisher import publish_to_instagram
 from linkedin_extractor import LinkedInPost, build_linkedin_post
 from post_store import get_next_post, mark_published
+from website_publisher import publish_to_website
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ENV_PATH = PROJECT_ROOT / ".env"
@@ -192,6 +193,7 @@ def run(
     if not require_explicit_approval(preview, platform=platform):
         return 0
 
+    publish_to_website(queued, image_path)
     publish_approved(preview, platform=platform)
     mark_published(queued.id, path=posts_path)
     print(f"Published post {queued.id}. Status set to published.")
