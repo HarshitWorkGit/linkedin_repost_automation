@@ -1,4 +1,4 @@
-"""Publish the next queued LinkedIn post to Facebook and Instagram.
+"""Publish the next queued LinkedIn post to the configured destination.
 
 The queue is ``data/linkedin_posts.json``. This module selects one record,
 downloads its first image, shows a preview, and publishes only after the
@@ -29,7 +29,8 @@ ENV_PATH = PROJECT_ROOT / ".env"
 GENERATED_DIR = PROJECT_ROOT / "generated"
 APPROVAL_TOKEN = "APPROVE"
 DEFAULT_PLATFORM = "both"
-PLATFORM_CHOICES = ("instagram", "facebook", "both")
+WEBSITE_PLATFORM = "website"
+PLATFORM_CHOICES = ("instagram", "facebook", "both", WEBSITE_PLATFORM)
 
 _IMAGE_EXTENSIONS = {
     "image/jpeg": ".jpg",
@@ -50,7 +51,7 @@ class RepostPreview:
 
 
 def prepare_preview(post: LinkedInPost) -> RepostPreview:
-    """Build the Facebook and Instagram preview from an extracted post.
+    """Build the publish preview from an extracted post.
 
     TODO: Format platform-specific captions if Facebook and Instagram need
     different text later. Both platforms currently share the LinkedIn caption.
@@ -194,7 +195,8 @@ def run(
         return 0
 
     publish_to_website(queued, image_path)
-    publish_approved(preview, platform=platform)
+    if platform != WEBSITE_PLATFORM:
+        publish_approved(preview, platform=platform)
     mark_published(queued.id, path=posts_path)
     print(f"Published post {queued.id}. Status set to published.")
     return 0
@@ -204,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Publish the next new LinkedIn post from data/linkedin_posts.json "
-            "to Facebook and Instagram after explicit approval."
+            "after explicit approval."
         )
     )
     parser.add_argument(
@@ -220,14 +222,27 @@ def main(argv: list[str] | None = None) -> int:
         default=DEFAULT_PLATFORM,
         help=(
             "Platform to publish to after approval. "
+            "'website' publishes only to the Synergy AI website; "
             "'both' publishes to Facebook, then Instagram. Default: both."
+        ),
+    )
+    parser.add_argument(
+        "--posts-path",
+        type=Path,
+        help=(
+            "Optional path to a queue JSON file. When omitted, the production "
+            "data/linkedin_posts.json queue is used."
         ),
     )
     args = parser.parse_args(argv)
     selected_id = args.post_id.strip() if args.post_id else None
 
     try:
-        return run(post_id=selected_id, platform=args.platform)
+        return run(
+            post_id=selected_id,
+            posts_path=args.posts_path,
+            platform=args.platform,
+        )
     except NotImplementedError as exc:
         print(f"Not implemented: {exc}", file=sys.stderr)
         return 2
@@ -238,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
 
 def _publishers_for(platform: str) -> tuple[tuple[str, Callable[..., object]], ...]:
     """Return ``(label, publish)`` pairs in publish order for one platform choice."""
+    if platform == WEBSITE_PLATFORM:
+        return ()
+
     ordered = (
         ("facebook", "Facebook", publish_to_facebook),
         ("instagram", "Instagram", publish_to_instagram),
@@ -254,6 +272,8 @@ def _publishers_for(platform: str) -> tuple[tuple[str, Callable[..., object]], .
 
 
 def _platform_labels(platform: str) -> tuple[str, ...]:
+    if platform == WEBSITE_PLATFORM:
+        return ("Synergy AI website",)
     return tuple(label for label, _publish in _publishers_for(platform))
 
 
