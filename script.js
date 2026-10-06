@@ -26,6 +26,26 @@ function postCard(post) {
   const article = document.createElement("article");
   article.className = "card";
 
+  if (post.linkedin_url) {
+    article.classList.add("card-link");
+    article.tabIndex = 0;
+    article.setAttribute("role", "link");
+    article.setAttribute("aria-label", "Open LinkedIn post");
+
+    const openLinkedIn = () => {
+      window.open(post.linkedin_url, "_blank", "noopener,noreferrer");
+    };
+
+    article.addEventListener("click", openLinkedIn);
+
+    article.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openLinkedIn();
+      }
+    });
+  }
+
   const media = document.createElement("div");
   media.className = "card-media";
 
